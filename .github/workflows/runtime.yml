@@ -1,0 +1,52 @@
+name: macOS encrypted runtime experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run encrypted experiment
+        id: experiment
+        shell: bash
+        env:
+          HARNESS_KEY: ${{ secrets.HARNESS_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$HARNESS_KEY"
+          mkdir -p "$RUNNER_TEMP/private-harness" "$RUNNER_TEMP/private-output"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 \
+            -in payload/harness.tar.gz.enc \
+            -out "$RUNNER_TEMP/harness.tar.gz" \
+            -pass env:HARNESS_KEY
+          tar -xzf "$RUNNER_TEMP/harness.tar.gz" -C "$RUNNER_TEMP/private-harness"
+          chmod +x "$RUNNER_TEMP/private-harness/run.zsh"
+          set +e
+          "$RUNNER_TEMP/private-harness/run.zsh" \
+            >"$RUNNER_TEMP/private-output/console.txt" 2>&1
+          code=$?
+          set -e
+          printf '%s\n' "$code" > "$RUNNER_TEMP/private-output/exit-code.txt"
+          tar -czf "$RUNNER_TEMP/private-output.tar.gz" \
+            -C "$RUNNER_TEMP/private-output" .
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 250000 \
+            -in "$RUNNER_TEMP/private-output.tar.gz" \
+            -out "$RUNNER_TEMP/private-output.tar.gz.enc" \
+            -pass env:HARNESS_KEY
+          printf 'exit_code=%s\n' "$code"
+          shasum -a 256 "$RUNNER_TEMP/private-output.tar.gz.enc" | awk '{print "encrypted_output_sha256=" $1}'
+          exit "$code"
+      - name: Upload encrypted output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-output
+          path: ${{ runner.temp }}/private-output.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 1
