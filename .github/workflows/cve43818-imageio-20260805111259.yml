@@ -1,0 +1,118 @@
+name: CVE-2026-43818 isolated ImageIO binary diff 20260805111259
+on:
+  push:
+    branches: [cve43818-imageio-20260805111259]
+permissions:
+  contents: read
+jobs:
+  exact-sequoia-diff:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Extract vulnerable and OTA-patched ImageIO cache images
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ulimit -c unlimited || true
+          mkdir -p "$RUNNER_TEMP/cve43818" "$GITHUB_WORKSPACE/out/vulnerable" "$GITHUB_WORKSPACE/out/patched" "$GITHUB_WORKSPACE/out/meta"
+          sw_vers | tee "$GITHUB_WORKSPACE/out/meta/host-sw_vers.txt"
+          uname -a | tee "$GITHUB_WORKSPACE/out/meta/host-uname.txt"
+          df -h | tee "$GITHUB_WORKSPACE/out/meta/df-before.txt"
+          mount | tee "$GITHUB_WORKSPACE/out/meta/mount.txt"
+          diskutil list | tee "$GITHUB_WORKSPACE/out/meta/diskutil-list.txt"
+          diskutil info /System/Cryptexes/OS | tee "$GITHUB_WORKSPACE/out/meta/cryptex-diskutil-info.txt" || true
+          hdiutil info | tee "$GITHUB_WORKSPACE/out/meta/hdiutil-info.txt" || true
+          find /System/Volumes/Preboot -maxdepth 8 -type f -size +100M -print 2>/dev/null | tee "$GITHUB_WORKSPACE/out/meta/preboot-large-files.txt" || true
+          V=3.1.707
+          curl -L --fail --retry 5 -o "$RUNNER_TEMP/ipsw.tgz" "https://github.com/blacktop/ipsw/releases/download/v${V}/ipsw_${V}_macOS_arm64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/ipsw"
+          tar xzf "$RUNNER_TEMP/ipsw.tgz" -C "$RUNNER_TEMP/ipsw"
+          IPSW="$RUNNER_TEMP/ipsw/ipsw"
+          "$IPSW" version | tee "$GITHUB_WORKSPACE/out/meta/ipsw-version.txt"
+          VCACHE=''
+          for c in /System/Library/dyld/dyld_shared_cache_arm64e /System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e; do
+            if [[ -f "$c" ]]; then VCACHE="$c"; break; fi
+          done
+          [[ -n "$VCACHE" ]]
+          echo "$VCACHE" | tee "$GITHUB_WORKSPACE/out/meta/vulnerable-cache-path.txt"
+          shasum -a 256 "$VCACHE" | tee "$GITHUB_WORKSPACE/out/meta/vulnerable-cache-sha256.txt"
+          "$IPSW" dyld info --dylibs "$VCACHE" > "$GITHUB_WORKSPACE/out/meta/vulnerable-dylibs.txt"
+          grep -Ei 'ImageIO|AppleJPEG|JPEG|PNG|HEIF|HEIC|AVIF|WebP|GIF|TIFF|CoreSVG|RawCamera|OpenEXR|JP2|JPEG2000|ASTC|Radiance|TGA|BMP|ICO|PSD|PICT|DDS' "$GITHUB_WORKSPACE/out/meta/vulnerable-dylibs.txt" > "$GITHUB_WORKSPACE/out/meta/vulnerable-candidates.txt" || true
+          awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}' "$GITHUB_WORKSPACE/out/meta/vulnerable-candidates.txt" | sort -u > "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
+          cat "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
+          while IFS= read -r p; do
+            [[ -z "$p" ]] && continue
+            "$IPSW" dyld extract "$VCACHE" "$p" --force --output "$GITHUB_WORKSPACE/out/vulnerable" || true
+          done < "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
+
+          OTA="$RUNNER_TEMP/24G720-to-24G806.zip"
+          URL='https://updates.cdn-apple.com/2026SpringSeed/patches/122-82796/850C8507-0A58-45ED-8FBA-4FC14AF49C46/com_apple_MobileAsset_MacSoftwareUpdate/ed33afef2dc4d8fde5185830c36ace8c64bd8fa0.zip'
+          for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            curl -L --fail --retry 3 -C - -o "$OTA" "$URL" && break
+            sleep 2
+          done
+          unzip -t "$OTA" | tail -3 | tee "$GITHUB_WORKSPACE/out/meta/ota-zip-test.txt"
+          unzip -p "$OTA" AssetData/Info.plist > "$GITHUB_WORKSPACE/out/meta/ota-AssetData-Info.plist"
+          plutil -p "$GITHUB_WORKSPACE/out/meta/ota-AssetData-Info.plist" | tee "$GITHUB_WORKSPACE/out/meta/ota-info.txt"
+          unzip -p "$OTA" AssetData/payloadv2/image_patches/cryptex-system-arm64e > "$RUNNER_TEMP/cryptex-system-arm64e.ridiff"
+          shasum -a 256 "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" | tee "$GITHUB_WORKSPACE/out/meta/ridiff-sha256.txt"
+          xxd -l 128 "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" | tee "$GITHUB_WORKSPACE/out/meta/ridiff-header.txt"
+
+          cat > "$RUNNER_TEMP/ridiff_apply.c" <<'C'
+          #include <stdio.h>
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <dlfcn.h>
+          typedef struct { int64_t unknown1; int64_t unknown2; char *input; char *output; char *patch; uint32_t not_cryptex_cache; uint32_t threads; uint32_t verbose; } RawImage;
+          typedef int32_t (*RawImagePatchFn)(RawImage *);
+          int main(int argc,char **argv){
+            if(argc!=4){fprintf(stderr,"usage: %s BASE OUTPUT PATCH\n",argv[0]);return 2;}
+            void *h=dlopen("/usr/lib/libParallelCompression.dylib",RTLD_LAZY);
+            if(!h){fprintf(stderr,"dlopen: %s\n",dlerror());return 3;}
+            RawImagePatchFn f=(RawImagePatchFn)dlsym(h,"RawImagePatch");
+            if(!f){fprintf(stderr,"dlsym: %s\n",dlerror());return 4;}
+            RawImage r={0,0,argv[1],argv[2],argv[3],0,0,1};
+            int32_t ret=f(&r); fprintf(stderr,"RawImagePatch returned %d\n",ret); return ret;
+          }
+          C
+          clang -O2 -Wall -o "$RUNNER_TEMP/ridiff_apply" "$RUNNER_TEMP/ridiff_apply.c"
+          DEV=$(df /System/Cryptexes/OS | awk 'END{print $1}')
+          echo "$DEV" | tee "$GITHUB_WORKSPACE/out/meta/cryptex-device.txt"
+          diskutil info "$DEV" | tee "$GITHUB_WORKSPACE/out/meta/cryptex-device-info.txt"
+          OUTDMG="$RUNNER_TEMP/patched-24G806.dmg"
+          set +e
+          sudo "$RUNNER_TEMP/ridiff_apply" "$DEV" "$OUTDMG" "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" 2>&1 | tee "$GITHUB_WORKSPACE/out/meta/ridiff-apply-device.txt"
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [[ $RC -ne 0 || ! -s "$OUTDMG" ]]; then
+            echo "direct device input failed; copying base block device" | tee -a "$GITHUB_WORKSPACE/out/meta/ridiff-apply-device.txt"
+            sudo dd if="$DEV" of="$RUNNER_TEMP/base-cryptex.dmg" bs=4m status=progress
+            sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/base-cryptex.dmg"
+            "$RUNNER_TEMP/ridiff_apply" "$RUNNER_TEMP/base-cryptex.dmg" "$OUTDMG" "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" 2>&1 | tee "$GITHUB_WORKSPACE/out/meta/ridiff-apply-file.txt"
+          fi
+          ls -lh "$OUTDMG" | tee "$GITHUB_WORKSPACE/out/meta/patched-dmg-size.txt"
+          shasum -a 256 "$OUTDMG" | tee "$GITHUB_WORKSPACE/out/meta/patched-dmg-sha256.txt"
+          mkdir -p "$RUNNER_TEMP/patched-mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/patched-mount" "$OUTDMG" | tee "$GITHUB_WORKSPACE/out/meta/patched-hdiutil-attach.txt"
+          find "$RUNNER_TEMP/patched-mount" -maxdepth 8 -type f -name 'dyld_shared_cache*' -ls | tee "$GITHUB_WORKSPACE/out/meta/patched-caches.txt"
+          PCACHE=$(find "$RUNNER_TEMP/patched-mount" -type f -name dyld_shared_cache_arm64e | head -1)
+          [[ -n "$PCACHE" ]]
+          echo "$PCACHE" | tee "$GITHUB_WORKSPACE/out/meta/patched-cache-path.txt"
+          shasum -a 256 "$PCACHE" | tee "$GITHUB_WORKSPACE/out/meta/patched-cache-sha256.txt"
+          "$IPSW" dyld info --dylibs "$PCACHE" > "$GITHUB_WORKSPACE/out/meta/patched-dylibs.txt"
+          while IFS= read -r p; do
+            [[ -z "$p" ]] && continue
+            "$IPSW" dyld extract "$PCACHE" "$p" --force --output "$GITHUB_WORKSPACE/out/patched" || true
+          done < "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
+          find "$GITHUB_WORKSPACE/out/vulnerable" -type f -print0 | sort -z | xargs -0 shasum -a 256 > "$GITHUB_WORKSPACE/out/meta/vulnerable-extracted-sha256.txt" || true
+          find "$GITHUB_WORKSPACE/out/patched" -type f -print0 | sort -z | xargs -0 shasum -a 256 > "$GITHUB_WORKSPACE/out/meta/patched-extracted-sha256.txt" || true
+          find "$GITHUB_WORKSPACE/out" -type f -maxdepth 5 -exec file {} \; > "$GITHUB_WORKSPACE/out/meta/files.txt" || true
+          du -ah "$GITHUB_WORKSPACE/out" | sort -h | tail -200 | tee "$GITHUB_WORKSPACE/out/meta/sizes.txt"
+          df -h | tee "$GITHUB_WORKSPACE/out/meta/df-after.txt"
+          hdiutil detach "$RUNNER_TEMP/patched-mount" || true
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cve43818-sequoia-24G720-vs-24G806
+          path: out
+          if-no-files-found: error
+          compression-level: 1
