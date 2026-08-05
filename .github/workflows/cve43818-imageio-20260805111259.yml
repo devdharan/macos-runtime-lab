@@ -37,7 +37,7 @@ jobs:
           echo "$VCACHE" | tee "$GITHUB_WORKSPACE/out/meta/vulnerable-cache-path.txt"
           shasum -a 256 "$VCACHE" | tee "$GITHUB_WORKSPACE/out/meta/vulnerable-cache-sha256.txt"
           "$IPSW" dyld info --dylibs "$VCACHE" > "$GITHUB_WORKSPACE/out/meta/vulnerable-dylibs.txt"
-          grep -Ei 'ImageIO|AppleJPEG|JPEG|PNG|HEIF|HEIC|AVIF|WebP|GIF|TIFF|CoreSVG|RawCamera|OpenEXR|JP2|JPEG2000|ASTC|Radiance|TGA|BMP|ICO|PSD|PICT|DDS' "$GITHUB_WORKSPACE/out/meta/vulnerable-dylibs.txt" > "$GITHUB_WORKSPACE/out/meta/vulnerable-candidates.txt" || true
+          grep -E '/ImageIO\.framework/|/CoreServices/RawCamera\.bundle/Contents/MacOS/RawCamera|/PrivateFrameworks/(AppleJPEG|AppleJPEGXL|CoreSVG)\.framework/|/lib(AppleEXR|HEIF|WebP|AVIF|JPEGXL|ASTC|DDS|TGA|BMP|ICO|PSD|PICT)[^/]*\.dylib' "$GITHUB_WORKSPACE/out/meta/vulnerable-dylibs.txt" > "$GITHUB_WORKSPACE/out/meta/vulnerable-candidates.txt" || true
           awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}' "$GITHUB_WORKSPACE/out/meta/vulnerable-candidates.txt" | sort -u > "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
           cat "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
           while IFS= read -r p; do
@@ -45,8 +45,8 @@ jobs:
             "$IPSW" dyld extract "$VCACHE" "$p" --force --output "$GITHUB_WORKSPACE/out/vulnerable" || true
           done < "$GITHUB_WORKSPACE/out/meta/candidate-paths.txt"
 
-          OTA="$RUNNER_TEMP/24G720-to-24G806.zip"
-          URL='https://updates.cdn-apple.com/2026SpringSeed/patches/122-82796/850C8507-0A58-45ED-8FBA-4FC14AF49C46/com_apple_MobileAsset_MacSoftwareUpdate/ed33afef2dc4d8fde5185830c36ace8c64bd8fa0.zip'
+          OTA="$RUNNER_TEMP/24G720-to-24G824.zip"
+          URL='https://updates.cdn-apple.com/2026SpringFCS/patches/122-94774/14EF8C52-3F2D-409D-B482-BD44968DC68E/com_apple_MobileAsset_MacSoftwareUpdate/f75d975b2393f421da8f73fa0e456d06eb53610c.zip'
           for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -L --fail --retry 3 -C - -o "$OTA" "$URL" && break
             sleep 2
@@ -76,20 +76,13 @@ jobs:
           }
           C
           clang -O2 -Wall -o "$RUNNER_TEMP/ridiff_apply" "$RUNNER_TEMP/ridiff_apply.c"
-          DEV=$(df /System/Cryptexes/OS | awk 'END{print $1}')
-          echo "$DEV" | tee "$GITHUB_WORKSPACE/out/meta/cryptex-device.txt"
-          diskutil info "$DEV" | tee "$GITHUB_WORKSPACE/out/meta/cryptex-device-info.txt"
-          OUTDMG="$RUNNER_TEMP/patched-24G806.dmg"
-          set +e
-          sudo "$RUNNER_TEMP/ridiff_apply" "$DEV" "$OUTDMG" "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" 2>&1 | tee "$GITHUB_WORKSPACE/out/meta/ridiff-apply-device.txt"
-          RC=${PIPESTATUS[0]}
-          set -e
-          if [[ $RC -ne 0 || ! -s "$OUTDMG" ]]; then
-            echo "direct device input failed; copying base block device" | tee -a "$GITHUB_WORKSPACE/out/meta/ridiff-apply-device.txt"
-            sudo dd if="$DEV" of="$RUNNER_TEMP/base-cryptex.dmg" bs=4m status=progress
-            sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/base-cryptex.dmg"
-            "$RUNNER_TEMP/ridiff_apply" "$RUNNER_TEMP/base-cryptex.dmg" "$OUTDMG" "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" 2>&1 | tee "$GITHUB_WORKSPACE/out/meta/ridiff-apply-file.txt"
-          fi
+          BASE=$(find /System/Volumes/Preboot -path '*/cryptex1/current/os.dmg' -type f | head -1)
+          [[ -n "$BASE" ]]
+          echo "$BASE" | tee "$GITHUB_WORKSPACE/out/meta/base-cryptex-path.txt"
+          ls -lsh "$BASE" | tee "$GITHUB_WORKSPACE/out/meta/base-cryptex-size.txt"
+          shasum -a 256 "$BASE" | tee "$GITHUB_WORKSPACE/out/meta/base-cryptex-sha256.txt"
+          OUTDMG="$RUNNER_TEMP/patched-24G824.dmg"
+          "$RUNNER_TEMP/ridiff_apply" "$BASE" "$OUTDMG" "$RUNNER_TEMP/cryptex-system-arm64e.ridiff" 2>&1 | tee "$GITHUB_WORKSPACE/out/meta/ridiff-apply-file.txt"
           ls -lh "$OUTDMG" | tee "$GITHUB_WORKSPACE/out/meta/patched-dmg-size.txt"
           shasum -a 256 "$OUTDMG" | tee "$GITHUB_WORKSPACE/out/meta/patched-dmg-sha256.txt"
           mkdir -p "$RUNNER_TEMP/patched-mount"
@@ -112,7 +105,8 @@ jobs:
           hdiutil detach "$RUNNER_TEMP/patched-mount" || true
       - uses: actions/upload-artifact@v6
         with:
-          name: cve43818-sequoia-24G720-vs-24G806
+          name: cve43818-sequoia-24G720-vs-24G824
           path: out
           if-no-files-found: error
           compression-level: 1
+          if: always()
