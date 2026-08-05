@@ -28,7 +28,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/harness.tar.gz" -C "$RUNNER_TEMP/private-harness"
           chmod +x "$RUNNER_TEMP/private-harness/run.zsh"
           set +e
-          "$RUNNER_TEMP/private-harness/run.zsh" \
+          PRIVATE_OUTPUT_DIR="$RUNNER_TEMP/private-output" \
+            "$RUNNER_TEMP/private-harness/run.zsh" \
             >"$RUNNER_TEMP/private-output/console.txt" 2>&1
           code=$?
           set -e
