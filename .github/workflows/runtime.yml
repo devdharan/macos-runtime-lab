@@ -1,4 +1,4 @@
-name: macOS encrypted runtime experiment
+name: Asana cross-user trigger boundary validation
 
 on:
   workflow_dispatch:
@@ -12,17 +12,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Run encrypted experiment
+      - name: Run encrypted bounded experiment
         id: experiment
         shell: bash
         env:
-          HARNESS_KEY: ${{ secrets.HARNESS_KEY }}
+          HARNESS_KEY: ${{ secrets.ASANA_CROSS_USER_KEY }}
         run: |
           set -euo pipefail
           test -n "$HARNESS_KEY"
           mkdir -p "$RUNNER_TEMP/private-harness" "$RUNNER_TEMP/private-output"
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 \
-            -in payload/harness.tar.gz.enc \
+            -in payload/asana-cross-user-trigger-harness.tar.gz.enc \
             -out "$RUNNER_TEMP/harness.tar.gz" \
             -pass env:HARNESS_KEY
           tar -xzf "$RUNNER_TEMP/harness.tar.gz" -C "$RUNNER_TEMP/private-harness"
